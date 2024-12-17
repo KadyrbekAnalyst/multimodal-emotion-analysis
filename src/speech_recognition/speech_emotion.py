@@ -6,7 +6,7 @@ import warnings
 import shutil
 from datetime import datetime
 from tqdm import tqdm
-from visualizer import AudioVisualizer, generate_summary_visualization
+from .visualizer import AudioVisualizer, generate_summary_visualization
 
 # Отключаем предупреждения TensorFlow
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
