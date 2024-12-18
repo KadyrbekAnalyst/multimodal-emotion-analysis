@@ -1,101 +1,159 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
     <title>Multimodal Emotion Analysis</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body {
             background-color: #0e1117;
             color: white;
+            font-family: "Source Sans Pro", sans-serif;
+        }
+        .main-content {
+            margin-left: 260px;
+            padding: 20px;
+        }
+        .sidebar {
+            position: fixed;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 260px;
+            background-color: #0e1117;
+            padding: 20px;
+            border-right: 1px solid #1e2329;
         }
         .video-container {
-            position: relative;
-            margin: 20px auto;
-            text-align: center;
-        }
-        #userVideo {
+            background-color: #262730;
             border-radius: 10px;
-            width: 80%;
-            max-width: 640px;
+            padding: 20px;
+            margin-bottom: 20px;
         }
-        .result-container {
-            margin: 20px;
+        .instructions {
+            background-color: #1e2329;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .instructions li {
+            margin-bottom: 10px;
+            color: #fafafa;
+        }
+        #video {
+            width: 100%;
+            border-radius: 5px;
+        }
+        .btn-primary {
+            background-color: #ff4b4b;
+            border: none;
+            padding: 10px 30px;
+            font-weight: 600;
+        }
+        .btn-primary:hover {
+            background-color: #ff3333;
+        }
+        .status {
+            background-color: #1e2329;
+            border-radius: 5px;
+            padding: 10px;
+            margin-top: 10px;
         }
     </style>
 </head>
 <body>
-<div class="container">
-    <h1 class="text-center mt-3">Multimodal Emotion Analysis</h1>
-
-    <!-- Video Container -->
-    <div class="video-container">
-        <video autoplay id="userVideo"></video>
-        <button id="startRecording" class="btn btn-success mt-3">Start Recording</button>
+    <div class="sidebar">
+        <h4>About</h4>
+        <p>This project analyzes emotions using three modalities:</p>
+        <ul>
+            <li>👤 Facial Expressions (Video)</li>
+            <li>🗣️ Speech Patterns (Audio)</li>
+            <li>📝 Text Content (Speech-to-Text)</li>
+        </ul>
+        
+        <h4>How it works</h4>
+        <ol>
+            <li>Click 'START' to initialize camera</li>
+            <li>Allow camera and microphone access</li>
+            <li>Click 'Record' for 15-second recording</li>
+            <li>Stay in frame and speak naturally</li>
+            <li>View analysis results</li>
+        </ol>
     </div>
 
-    <!-- Results Container -->
-    <div class="result-container">
-        <canvas id="emotionChart" style="display:none;"></canvas>
+    <div class="main-content">
+        <h1>Multimodal Emotion Analysis</h1>
+        
+        <div class="instructions">
+            <h5>👉 Instructions:</h5>
+            <ol>
+                <li>Allow camera and microphone access when prompted</li>
+                <li>Click 'Record' to start 15-second recording</li>
+                <li>Stay in frame and speak naturally</li>
+            </ol>
+        </div>
+
+        <div class="video-container">
+            <img id="video" src="{{ url_for('video_feed') }}">
+        </div>
+
+        <button id="recordButton" class="btn btn-primary">Start Recording</button>
+        <div class="status" id="status" style="display: none"></div>
+        
+        <div id="results" style="display: none">
+            <h2>Analysis Results</h2>
+            <div class="row" id="emotionResults"></div>
+        </div>
     </div>
-</div>
 
-<script>
-    let mediaRecorder, videoChunks = [];
-    const videoElement = document.getElementById('userVideo');
-
-    // Получаем видеопоток с камеры пользователя
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-        .then(stream => {
-            videoElement.srcObject = stream;
-            mediaRecorder = new MediaRecorder(stream);
-
-            mediaRecorder.ondataavailable = e => videoChunks.push(e.data);
-            mediaRecorder.onstop = () => sendVideoToServer();
-        });
-
-    // Начало записи
-    document.getElementById('startRecording').onclick = () => {
-        videoChunks = [];
-        mediaRecorder.start();
-        setTimeout(() => mediaRecorder.stop(), 15000);
-    };
-
-    // Отправка видео на сервер
-    function sendVideoToServer() {
-        const blob = new Blob(videoChunks, { type: 'video/webm' });
-        const formData = new FormData();
-        formData.append('video', blob);
-
-        fetch('/upload_video', { method: 'POST', body: formData })
-            .then(response => response.json())
-            .then(data => displayResults(data));
-    }
-
-    // Визуализация результатов с Chart.js
-    function displayResults(results) {
-        document.getElementById('emotionChart').style.display = 'block';
-        const ctx = document.getElementById('emotionChart').getContext('2d');
-
-        new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: Object.keys(results.fused_emotions),
-                datasets: [{
-                    label: 'Emotion Confidence (%)',
-                    data: Object.values(results.fused_emotions),
-                    backgroundColor: 'rgba(75, 192, 192, 0.6)'
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: {
-                    y: { beginAtZero: true }
-                }
+    <script>
+        let recording = false;
+        let timer = 15;
+        let timerInterval;
+        
+        $('#recordButton').click(function() {
+            if (!recording) {
+                startRecording();
             }
         });
-    }
-</script>
+
+        function startRecording() {
+            $.get('/start_recording', function(data) {
+                recording = true;
+                timer = 15;
+                $('#recordButton').prop('disabled', true);
+                $('#status').show().html('<div class="alert alert-warning">Recording in progress... ' + timer + 's remaining</div>');
+                
+                timerInterval = setInterval(updateTimer, 1000);
+                setTimeout(stopRecording, 15000);
+            });
+        }
+        
+        function updateTimer() {
+            if (timer <= 0) return;
+            timer--;
+            $('#status').html('<div class="alert alert-warning">Recording in progress... ' + timer + 's remaining</div>');
+        }
+        
+        function stopRecording() {
+            if (!recording) return;
+            
+            clearInterval(timerInterval);
+            $.get('/stop_recording', function(data) {
+                recording = false;
+                $('#recordButton').prop('disabled', false);
+                
+                if (data.status === 'stopped') {
+                    $('#status').html('<div class="alert alert-success">Recording complete! Analyzing...</div>');
+                    analyzeVideo(data.video_path);
+                }
+            });
+        }
+
+        function analyzeVideo(videoPath) {
+            $('#status').html('<div class="alert alert-info">Analyzing video... Please wait.</div>');
+            // Здесь будет запрос на анализ
+        }
+    </script>
 </body>
 </html>
