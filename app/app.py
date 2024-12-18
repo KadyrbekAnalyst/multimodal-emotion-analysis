@@ -1,156 +1,156 @@
-from flask import Flask, render_template, Response, jsonify
+from flask import Flask, render_template, jsonify, request
 import cv2
 import numpy as np
-import io
-import base64
-from datetime import datetime
-import logging
-import sys
 import os
+import base64
+import logging
+from datetime import datetime
+from ngrok import set_auth_token, connect
+import sys
+import subprocess
+from pydub import AudioSegment
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from main import EmotionAnalysisSystem
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Отключаем предупреждения TensorFlow
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 app = Flask(__name__)
 
-# Инициализация системы анализа
+# Загружаем каскад Хаара для детекции лиц
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+# Инициализируем систему анализа
 analysis_system = EmotionAnalysisSystem()
 
-class VideoCamera:
-    def __init__(self):
-        self.video = cv2.VideoCapture(0)
-        self.recording = False
-        self.frames = []  # Храним кадры в памяти
-        self.audio_frames = []  # Храним аудио в памяти
-        
-        # Настройки камеры
-        self.video.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.video.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.video.set(cv2.CAP_PROP_FPS, 30)
-        
-    def __del__(self):
-        self.video.release()
-        
-    def get_frame(self):
-        success, frame = self.video.read()
-        if success:
-            if self.recording:
-                # Сохраняем оригинальный кадр для анализа
-                self.frames.append(frame.copy())
-            
-            # Оптимизируем для стриминга
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
-            ret, jpeg = cv2.imencode('.jpg', frame, encode_param)
-            return jpeg.tobytes()
-        return None
-
-    def create_video_buffer(self):
-        """Создает видео буфер из сохраненных кадров"""
-        if not self.frames:
-            return None
-            
-        # Создаем буфер в памяти
-        buffer = io.BytesIO()
-        
-        # Получаем размеры из первого кадра
-        height, width = self.frames[0].shape[:2]
-        
-        # Создаем видео writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(buffer, fourcc, 30.0, (width, height))
-        
-        # Записываем кадры
-        for frame in self.frames:
-            out.write(frame)
-            
-        out.release()
-        buffer.seek(0)
-        return buffer
-
-camera = VideoCamera()
+# Создаем необходимые директории
+os.makedirs('app/static/temp', exist_ok=True)
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/video_feed')
-def video_feed():
-    def generate():
-        while True:
-            frame = camera.get_frame()
-            if frame:
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
-                       
-    return Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
-@app.route('/start_recording')
-def start_recording():
+def convert_webm_to_wav(webm_path):
+    wav_path = webm_path.replace('.webm', '.wav')
     try:
-        camera.recording = True
-        camera.frames = []  # Очищаем предыдущие кадры
-        camera.audio_frames = []  # Очищаем предыдущие аудио данные
-        return jsonify({"status": "started"})
+        # Используем ffmpeg для конвертации
+        subprocess.run(['ffmpeg', '-i', webm_path, wav_path], check=True)
+        return wav_path
     except Exception as e:
-        logger.error(f"Error starting recording: {e}")
-        return jsonify({"status": "error", "message": str(e)})
+        logger.error(f"Error converting audio: {e}")
+        return None
 
-@app.route('/stop_recording')
-def stop_recording():
+@app.route('/upload_video', methods=['POST'])
+def upload_video():
     try:
-        camera.recording = False
-        
-        if not camera.frames:
-            return jsonify({"status": "error", "message": "No frames recorded"})
+        if 'video' not in request.files:
+            return jsonify({'error': 'No video file'}), 400
             
-        # Создаем буферы видео и аудио
-        video_buffer = camera.create_video_buffer()
-        
-        if not video_buffer:
-            return jsonify({"status": "error", "message": "Failed to create video buffer"})
-        
-        # Анализируем данные
+        video_file = request.files['video']
+        if not video_file:
+            return jsonify({'error': 'Empty video file'}), 400
+            
+        # Сохраняем файл временно
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_path = os.path.join('app', 'static', 'temp', f'video_{session_id}.webm')
+        os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+        video_file.save(temp_path)
+        logger.info(f"Video saved to {temp_path}")
+
+        # Конвертируем видео в WAV для анализа аудио
+        wav_path = convert_webm_to_wav(temp_path)
+        if wav_path is None:
+            return jsonify({'error': 'Failed to convert audio'}), 500
+
+        # Запускаем анализ
         results = analysis_system.analyze_session({
-            'video_data': video_buffer,
-            'audio_data': camera.audio_frames,
+            'video_path': temp_path,
+            'audio_path': wav_path,
+            'session_id': session_id
         })
-        
-        if not results:
-            return jsonify({"status": "error", "message": "Analysis failed"})
-            
-        # Получаем графики в формате base64
-        visualizations = results.get('visualizations', {})
-        
-        # Очищаем буферы
-        camera.frames = []
-        camera.audio_frames = []
+
+        if results is None:
+            return jsonify({'error': 'Analysis failed'}), 500
+
+        # Формируем URL для визуализации
+        visualization_url = f'/static/temp/visualizations/visualization_video_{session_id}.webm.png'
         
         return jsonify({
-            "status": "success",
-            "results": {
-                "emotions": results.get('fusion_results', {}),
-                "visualizations": visualizations
-            }
+            'status': 'success',
+            'results': results,
+            'visualization_url': visualization_url
         })
         
     except Exception as e:
-        logger.error(f"Error processing recording: {e}")
-        return jsonify({"status": "error", "message": str(e)})
+        logger.error(f"Error processing video: {e}")
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/analyze')
-def analyze():
-    """Отдельный endpoint для анализа"""
+@app.route('/check_face', methods=['POST'])
+def check_face():
     try:
-        latest_results = analysis_system.get_latest_results()
-        if latest_results:
-            return jsonify({"status": "success", "results": latest_results})
-        return jsonify({"status": "error", "message": "No results available"})
+        image_data = request.json.get('image')
+        if not image_data:
+            return jsonify({'error': 'No image data'}), 400
+            
+        # Конвертируем base64 в изображение
+        encoded_data = image_data.split(',')[1]
+        nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Ищем лица
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        
+        return jsonify({
+            'faces_found': len(faces) > 0,
+            'face_count': len(faces)
+        })
+        
     except Exception as e:
-        logger.error(f"Error retrieving results: {e}")
-        return jsonify({"status": "error", "message": str(e)})
+        logger.error(f"Error checking face: {e}")
+        return jsonify({'error': str(e)}), 500
+
+def cleanup_temp_files():
+    """Очистка старых временных файлов"""
+    temp_dir = 'app/static/temp'
+    if os.path.exists(temp_dir):
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                try:
+                    file_path = os.path.join(root, file)
+                    if os.path.isfile(file_path):
+                        if (datetime.now() - datetime.fromtimestamp(os.path.getctime(file_path))).total_seconds() > 3600:
+                            os.unlink(file_path)
+                except Exception as e:
+                    logger.error(f"Error deleting {file_path}: {e}")
+
+def setup_ngrok():
+    """Настройка ngrok"""
+    try:
+        auth_token = "2qMDpFmlpVUaiccMGxv4YggGYZH_5b9ZW2i2obxFy8bELJU2U"  # Замените на ваш токен
+        set_auth_token(auth_token)
+        public_url = connect(5000)
+        logger.info(f"Public URL: {public_url}")
+        return public_url
+    except Exception as e:
+        logger.error(f"Ngrok setup failed: {e}")
+        return None
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    try:
+        cleanup_temp_files()
+        public_url = setup_ngrok()
+        app.run(host='0.0.0.0', port=5000, debug=True)
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+    finally:
+        cleanup_temp_files()
